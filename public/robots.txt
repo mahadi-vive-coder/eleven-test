@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+Disallow: /track-order
+Disallow: /checkout
+Disallow: /account
+Disallow: /cart
+Disallow: /api/
+
+Sitemap: https://www.elevennation.shop/sitemap.xml
