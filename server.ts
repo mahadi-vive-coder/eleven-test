@@ -1,16 +1,33 @@
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
-import { createServer as createViteServer } from 'vite';
+import { fileURLToPath } from 'url';
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const PORT = 3000;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const PORT = Number(process.env.PORT) || 3000;
+const isVercel = Boolean(process.env.VERCEL);
+const isProduction = process.env.NODE_ENV === 'production' || isVercel;
+
 const app = express();
 
 app.use(express.json());
+
+// Normalize Vercel rewritten paths if routed via /api
+app.use((req, res, next) => {
+  const vercelMatchedPath = req.headers['x-matched-path'];
+  if (typeof vercelMatchedPath === 'string' && vercelMatchedPath) {
+    if (req.url === '/api' || req.url === '/api/' || req.path === '/api') {
+      req.url = vercelMatchedPath;
+    }
+  }
+  next();
+});
 
 const supabaseUrl = process.env.VITE_SUPABASE_URL || '';
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.VITE_SUPABASE_ANON_KEY || '';
@@ -793,6 +810,13 @@ app.get('/api/orders/:idOrNumber', async (req, res) => {
 
 // Create order
 app.post('/api/orders', async (req, res) => {
+  // Data safety: in production / on Vercel, reject order creation if Supabase is not configured
+  if (isProduction && (!isSupabaseConfigured || !supabaseAdmin)) {
+    return res.status(503).json({
+      error: 'Database service is currently unavailable. Orders cannot be processed without database configuration in production.',
+    });
+  }
+
   const clientIp = req.ip || req.headers['x-forwarded-for']?.toString() || 'unknown';
   if (!checkOrderRateLimit(clientIp)) {
     return res.status(429).json({ error: 'Too many order requests. Please wait a moment and try again.' });
@@ -1110,15 +1134,40 @@ app.post('/api/orders', async (req, res) => {
             }
             return { status: 201, body: { success: true, order: sanitizeOrder(createdOrder) } };
           }
-        } else if (rpcErr && (rpcErr.message.includes('Insufficient') || rpcErr.message.includes('stock'))) {
-          return { status: 400, body: { error: rpcErr.message } };
+        } else if (rpcErr) {
+          const errMsg = rpcErr.message || 'Database error occurred while processing order';
+          if (errMsg.includes('Insufficient') || errMsg.includes('stock')) {
+            return { status: 400, body: { error: errMsg } };
+          }
+          if (isProduction) {
+            console.error('Supabase RPC error creating order in production:', errMsg);
+            return {
+              status: 503,
+              body: { error: 'Database service temporarily unavailable. Order could not be persisted safely.' },
+            };
+          }
         }
-      } catch (err) {
-        console.warn('Supabase order creation attempt failed, using in-memory store:', err);
+      } catch (err: any) {
+        if (isProduction) {
+          console.error('Supabase order creation exception in production:', err?.message || 'Database error');
+          return {
+            status: 503,
+            body: { error: 'Database service temporarily unavailable. Order could not be persisted safely.' },
+          };
+        }
+        console.warn('Supabase order creation attempt failed, using in-memory store in dev:', err);
       }
     }
 
-    // Atomic in-memory stock deduction and creation
+    // In production / Vercel, we must NEVER fall back to ephemeral in-memory storage
+    if (isProduction) {
+      return {
+        status: 503,
+        body: { error: 'Database service temporarily unavailable. Orders cannot be persisted safely.' },
+      };
+    }
+
+    // Atomic in-memory stock deduction and creation (Local Development fallback only)
     for (const item of items) {
       const catProd = inMemoryCatalog.get(item.product_id);
       if (catProd) {
@@ -1170,10 +1219,53 @@ app.post('/api/orders', async (req, res) => {
 // SITEMAP & ROBOTS.TXT
 // ============================================================================
 
+function getDistIndexPath(): string | null {
+  const possiblePaths = [
+    path.join(process.cwd(), 'dist', 'index.html'),
+    path.resolve(process.cwd(), 'dist/index.html'),
+    path.join(__dirname, 'dist', 'index.html'),
+    path.join(__dirname, '..', 'dist', 'index.html'),
+    path.join(__dirname, '../dist/index.html'),
+    path.join(process.cwd(), 'index.html'),
+  ];
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+function getRobotsTxtPath(): string | null {
+  const possiblePaths = [
+    path.join(process.cwd(), 'public', 'robots.txt'),
+    path.join(__dirname, 'public', 'robots.txt'),
+    path.join(__dirname, '..', 'public', 'robots.txt'),
+    path.join(process.cwd(), 'dist', 'robots.txt'),
+  ];
+  for (const p of possiblePaths) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+function getRequestPath(req: express.Request): string {
+  const matchedPath = req.headers['x-matched-path'];
+  if (typeof matchedPath === 'string' && matchedPath.length > 0) {
+    return matchedPath.split('?')[0];
+  }
+  const forwardedUrl = req.headers['x-forwarded-url'];
+  if (typeof forwardedUrl === 'string') {
+    try {
+      const u = forwardedUrl.startsWith('http') ? new URL(forwardedUrl) : new URL(`http://localhost${forwardedUrl}`);
+      return u.pathname;
+    } catch {}
+  }
+  return (req.originalUrl || req.path || '').split('?')[0];
+}
+
 // Robots.txt
 app.get('/robots.txt', (req, res) => {
-  const robotsPath = path.join(process.cwd(), 'public', 'robots.txt');
-  if (fs.existsSync(robotsPath)) {
+  const robotsPath = getRobotsTxtPath();
+  if (robotsPath && fs.existsSync(robotsPath)) {
     res.type('text/plain').sendFile(robotsPath);
   } else {
     res.type('text/plain').send('User-agent: *\nAllow: /\nDisallow: /track-order\nDisallow: /checkout\nDisallow: /account\nDisallow: /cart\nDisallow: /api/\n\nSitemap: https://www.elevennation.shop/sitemap.xml\n');
@@ -1251,7 +1343,7 @@ const FILE_EXT_REGEX = /\.(ico|png|jpe?g|svg|xml|txt|webmanifest|json|js|css|map
 
 async function renderHtml(req: express.Request, rawHtml: string): Promise<string> {
   let html = rawHtml;
-  const reqPath = (req.originalUrl || req.path || '').split('?')[0];
+  const reqPath = getRequestPath(req);
 
   // Handle /product/:slug injection
   if (reqPath.startsWith('/product/')) {
@@ -1334,72 +1426,129 @@ async function renderHtml(req: express.Request, rawHtml: string): Promise<string
     html = html.replace(/<meta property="og:url" content=".*?" \/>/i, `<meta property="og:url" content="https://www.elevennation.shop/clubs" />`);
   } else if (reqPath === '/players') {
     html = html.replace(/<title>.*?<\/title>/i, `<title>Star Players Roster | Eleven Nation Bangladesh</title>`);
+    html = html.replace(/<meta name="description" content=".*?" \/>/i, `<meta name="description" content="Choose your superstar or customize your kit with official matchday name & number heat-press printing in Bangladesh." />`);
     html = html.replace(/<link rel="canonical" href=".*?" \/>/i, `<link rel="canonical" href="https://www.elevennation.shop/players" />`);
     html = html.replace(/<meta property="og:url" content=".*?" \/>/i, `<meta property="og:url" content="https://www.elevennation.shop/players" />`);
+  } else if (reqPath === '/track-order') {
+    html = html.replace(/<title>.*?<\/title>/i, `<title>Track Your Order | Eleven Nation Bangladesh</title>`);
+    html = html.replace(/<meta name="description" content=".*?" \/>/i, `<meta name="description" content="Live tracking for your Eleven Nation jersey order with order number and phone verification. Fast delivery across all 64 districts." />`);
+    html = html.replace(/<link rel="canonical" href=".*?" \/>/i, `<link rel="canonical" href="https://www.elevennation.shop/track-order" />`);
+    html = html.replace(/<meta property="og:url" content=".*?" \/>/i, `<meta property="og:url" content="https://www.elevennation.shop/track-order" />`);
+  } else if (reqPath === '/checkout') {
+    html = html.replace(/<title>.*?<\/title>/i, `<title>Checkout &amp; Delivery | Eleven Nation Bangladesh</title>`);
+    html = html.replace(/<meta name="description" content=".*?" \/>/i, `<meta name="description" content="Complete your football jersey purchase with Cash on Delivery across all 64 districts in Bangladesh." />`);
+    html = html.replace(/<link rel="canonical" href=".*?" \/>/i, `<link rel="canonical" href="https://www.elevennation.shop/checkout" />`);
+    html = html.replace(/<meta property="og:url" content=".*?" \/>/i, `<meta property="og:url" content="https://www.elevennation.shop/checkout" />`);
+  } else if (reqPath === '/wishlist') {
+    html = html.replace(/<title>.*?<\/title>/i, `<title>Saved Jerseys | Eleven Nation Bangladesh</title>`);
+    html = html.replace(/<meta name="description" content=".*?" \/>/i, `<meta name="description" content="Your personal Eleven Nation jersey wishlist. Save favorite matchday kits and custom editions." />`);
+    html = html.replace(/<link rel="canonical" href=".*?" \/>/i, `<link rel="canonical" href="https://www.elevennation.shop/wishlist" />`);
+    html = html.replace(/<meta property="og:url" content=".*?" \/>/i, `<meta property="og:url" content="https://www.elevennation.shop/wishlist" />`);
+  } else if (reqPath === '/account') {
+    html = html.replace(/<title>.*?<\/title>/i, `<title>Customer Account | Eleven Nation Bangladesh</title>`);
+    html = html.replace(/<meta name="description" content=".*?" \/>/i, `<meta name="description" content="Manage your Eleven Nation orders, profile details, and delivery addresses." />`);
+    html = html.replace(/<link rel="canonical" href=".*?" \/>/i, `<link rel="canonical" href="https://www.elevennation.shop/account" />`);
+    html = html.replace(/<meta property="og:url" content=".*?" \/>/i, `<meta property="og:url" content="https://www.elevennation.shop/account" />`);
+  } else if (reqPath === '/size-guide') {
+    html = html.replace(/<title>.*?<\/title>/i, `<title>Jersey Size &amp; Fit Guide | Eleven Nation Bangladesh</title>`);
+    html = html.replace(/<meta name="description" content=".*?" \/>/i, `<meta name="description" content="Find your perfect fit. Compare Player Edition athletic slim cut vs Fan Edition regular fit measurements in inches." />`);
+    html = html.replace(/<link rel="canonical" href=".*?" \/>/i, `<link rel="canonical" href="https://www.elevennation.shop/size-guide" />`);
+    html = html.replace(/<meta property="og:url" content=".*?" \/>/i, `<meta property="og:url" content="https://www.elevennation.shop/size-guide" />`);
+  } else if (reqPath === '/exchange-policy') {
+    html = html.replace(/<title>.*?<\/title>/i, `<title>Exchange &amp; Return Policy | Eleven Nation Bangladesh</title>`);
+    html = html.replace(/<meta name="description" content=".*?" \/>/i, `<meta name="description" content="Hassle-free 7-day size exchange and authentic return guarantee for football kits across Bangladesh." />`);
+    html = html.replace(/<link rel="canonical" href=".*?" \/>/i, `<link rel="canonical" href="https://www.elevennation.shop/exchange-policy" />`);
+    html = html.replace(/<meta property="og:url" content=".*?" \/>/i, `<meta property="og:url" content="https://www.elevennation.shop/exchange-policy" />`);
+  } else if (reqPath === '/retro') {
+    html = html.replace(/<title>.*?<\/title>/i, `<title>Retro Football Jerseys &amp; Classic Kits | Eleven Nation Bangladesh</title>`);
+    html = html.replace(/<meta name="description" content=".*?" \/>/i, `<meta name="description" content="Iconic vintage football kits and retro player shirts in Bangladesh. Authentic retro styling." />`);
+    html = html.replace(/<link rel="canonical" href=".*?" \/>/i, `<link rel="canonical" href="https://www.elevennation.shop/retro" />`);
+    html = html.replace(/<meta property="og:url" content=".*?" \/>/i, `<meta property="og:url" content="https://www.elevennation.shop/retro" />`);
+  } else if (reqPath === '/worldcup') {
+    html = html.replace(/<title>.*?<\/title>/i, `<title>World Cup &amp; International Kits | Eleven Nation Bangladesh</title>`);
+    html = html.replace(/<meta name="description" content=".*?" \/>/i, `<meta name="description" content="Official international national team jerseys for World Cup and Copa America in Bangladesh." />`);
+    html = html.replace(/<link rel="canonical" href=".*?" \/>/i, `<link rel="canonical" href="https://www.elevennation.shop/worldcup" />`);
+    html = html.replace(/<meta property="og:url" content=".*?" \/>/i, `<meta property="og:url" content="https://www.elevennation.shop/worldcup" />`);
   }
 
   return html;
 }
 
 // ============================================================================
-// VITE DEV / PRODUCTION STATIC SERVING WITH CATCH-ALL & 404 FOR MISSING ASSETS
+// STATIC SERVING, VERCEL SERVERLESS & DEV SERVER HANDLING
 // ============================================================================
-async function startServer() {
-  const publicPath = path.join(process.cwd(), 'public');
-  // Always serve public directory explicitly
+const publicPath = path.join(process.cwd(), 'public');
+if (fs.existsSync(publicPath)) {
   app.use(express.static(publicPath));
-
-  if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'custom',
-    });
-    app.use(vite.middlewares);
-
-    // Fallback in dev
-    app.get('*', async (req, res, next) => {
-      const targetPath = (req.originalUrl || req.path || '').split('?')[0];
-      // If request has a file extension (e.g. .ico, .png, etc.) and was not caught above, respond 404
-      if (FILE_EXT_REGEX.test(targetPath)) {
-        return res.status(404).type('text/plain').send('Not Found');
-      }
-
-      try {
-        const indexPath = path.join(process.cwd(), 'index.html');
-        let template = fs.readFileSync(indexPath, 'utf-8');
-        template = await vite.transformIndexHtml(req.originalUrl, template);
-        const finalHtml = await renderHtml(req, template);
-        res.status(200).set({ 'Content-Type': 'text/html' }).end(finalHtml);
-      } catch (e) {
-        vite.ssrFixStacktrace(e as Error);
-        next(e);
-      }
-    });
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-
-    app.get('*', async (req, res) => {
-      const targetPath = (req.originalUrl || req.path || '').split('?')[0];
-      // If request has a file extension and was not found in dist, respond 404
-      if (FILE_EXT_REGEX.test(targetPath)) {
-        return res.status(404).type('text/plain').send('Not Found');
-      }
-
-      const indexPath = path.join(distPath, 'index.html');
-      if (fs.existsSync(indexPath)) {
-        const rawHtml = fs.readFileSync(indexPath, 'utf-8');
-        const finalHtml = await renderHtml(req, rawHtml);
-        res.status(200).set({ 'Content-Type': 'text/html' }).end(finalHtml);
-      } else {
-        res.status(404).type('text/plain').send('Not Found');
-      }
-    });
-  }
-
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Eleven Nation Shop running at http://0.0.0.0:${PORT}`);
-  });
 }
 
-startServer();
+const distPath = path.join(process.cwd(), 'dist');
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+}
+
+if (isProduction) {
+  // Production / Vercel Catch-All: reads built dist/index.html and injects SEO tags
+  app.get('*', async (req, res) => {
+    const targetPath = getRequestPath(req);
+    // If request has a file extension and was not found in static assets, respond 404
+    if (FILE_EXT_REGEX.test(targetPath)) {
+      return res.status(404).type('text/plain').send('Not Found');
+    }
+
+    const indexPath = getDistIndexPath();
+    if (indexPath && fs.existsSync(indexPath)) {
+      const rawHtml = fs.readFileSync(indexPath, 'utf-8');
+      const finalHtml = await renderHtml(req, rawHtml);
+      res.status(200).set({ 'Content-Type': 'text/html' }).end(finalHtml);
+    } else {
+      res.status(404).type('text/plain').send('Not Found: index.html not found');
+    }
+  });
+
+  // Local standalone production server (only if not running inside Vercel serverless)
+  if (!isVercel) {
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log(`Eleven Nation Shop running in production at http://0.0.0.0:${PORT}`);
+    });
+  }
+} else {
+  // Local development mode with dynamic Vite import
+  (async () => {
+    try {
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'custom',
+      });
+      app.use(vite.middlewares);
+
+      app.get('*', async (req, res, next) => {
+        const targetPath = (req.originalUrl || req.path || '').split('?')[0];
+        if (FILE_EXT_REGEX.test(targetPath)) {
+          return res.status(404).type('text/plain').send('Not Found');
+        }
+
+        try {
+          const indexPath = path.join(process.cwd(), 'index.html');
+          let template = fs.readFileSync(indexPath, 'utf-8');
+          template = await vite.transformIndexHtml(req.originalUrl, template);
+          const finalHtml = await renderHtml(req, template);
+          res.status(200).set({ 'Content-Type': 'text/html' }).end(finalHtml);
+        } catch (e) {
+          vite.ssrFixStacktrace(e as Error);
+          next(e);
+        }
+      });
+
+      app.listen(PORT, '0.0.0.0', () => {
+        console.log(`Eleven Nation Shop running in dev at http://0.0.0.0:${PORT}`);
+      });
+    } catch (err) {
+      console.error('Failed to start Vite dev server:', err);
+    }
+  })();
+}
+
+export { app };
+export default app;

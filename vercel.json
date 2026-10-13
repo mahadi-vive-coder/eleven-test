@@ -1,0 +1,26 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "functions": {
+    "api/index.ts": {
+      "includeFiles": "dist/**"
+    }
+  },
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api" },
+    { "source": "/sitemap.xml", "destination": "/api" },
+    { "source": "/", "destination": "/api" },
+    { "source": "/shop", "destination": "/api" },
+    { "source": "/clubs", "destination": "/api" },
+    { "source": "/players", "destination": "/api" },
+    { "source": "/product/:slug*", "destination": "/api" },
+    { "source": "/track-order", "destination": "/api" },
+    { "source": "/checkout", "destination": "/api" },
+    { "source": "/wishlist", "destination": "/api" },
+    { "source": "/account", "destination": "/api" },
+    { "source": "/size-guide", "destination": "/api" },
+    { "source": "/exchange-policy", "destination": "/api" },
+    { "source": "/retro", "destination": "/api" },
+    { "source": "/worldcup", "destination": "/api" }
+  ]
+}
