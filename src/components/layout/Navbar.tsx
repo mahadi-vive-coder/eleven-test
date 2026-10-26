@@ -84,9 +84,11 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenSearch, currentRoute, onNa
                 onClick={() => onNavigate('home')}
                 className="flex items-center gap-1.5 sm:gap-2 text-left group focus:outline-hidden"
               >
-                <div className="w-7 h-7 sm:w-8 sm:h-8 bg-[#111111] rounded-lg flex items-center justify-center font-brand font-black text-[#F1600D] text-sm sm:text-base tracking-tighter group-hover:scale-105 transition-transform shrink-0 shadow-2xs">
-                  11
-                </div>
+<img
+  src="/favicon.svg"
+  alt=""
+  className="w-7 h-7 sm:w-8 sm:h-8 object-contain shrink-0 group-hover:scale-105 transition-transform"
+/>
                 <div className="leading-tight">
                   <span className="font-brand font-black text-sm xs:text-base sm:text-lg lg:text-xl tracking-tight text-[#111111] block whitespace-nowrap">
                     ELEVEN NATION
@@ -220,9 +222,11 @@ export const Navbar: React.FC<NavbarProps> = ({ onOpenSearch, currentRoute, onNa
               {/* Header inside drawer */}
               <div className="flex items-center justify-between p-4 border-b border-[#E5E5E5]">
                 <div className="flex items-center gap-2">
-                  <div className="w-7 h-7 bg-[#111111] rounded-lg flex items-center justify-center font-brand font-black text-[#F1600D] text-sm">
-                    11
-                  </div>
+<img
+  src="/favicon.svg"
+  alt=""
+  className="w-7 h-7 sm:w-8 sm:h-8 object-contain shrink-0 group-hover:scale-105 transition-transform"
+/>
                   <span className="font-brand font-black text-lg text-[#111111]">ELEVEN NATION</span>
                 </div>
                 <button

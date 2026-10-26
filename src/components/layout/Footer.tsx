@@ -65,9 +65,11 @@ export const Footer: React.FC<FooterProps> = ({ onNavigate }) => {
           {/* Brand Col */}
           <div className="lg:col-span-2">
             <div className="flex items-center gap-2 mb-3">
-              <div className="w-7 h-7 sm:w-8 sm:h-8 bg-[#F1600D] rounded-lg flex items-center justify-center font-brand font-black text-[#111111] text-base sm:text-lg">
-                11
-              </div>
+<img
+  src="/favicon.svg"
+  alt=""
+  className="w-7 h-7 sm:w-8 sm:h-8 object-contain shrink-0 group-hover:scale-105 transition-transform"
+/>
               <span className="font-brand font-black text-lg sm:text-xl tracking-tight text-white">
                 ELEVEN NATION
               </span>
